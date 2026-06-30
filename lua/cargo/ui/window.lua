@@ -4,23 +4,24 @@ local Spinner = require("cargo.ui.spinner")
 local ns      = vim.api.nvim_create_namespace("cargo_nvim")
 
 -- ──────────────────────────────────────────────────────────────
--- ハイライト
+-- ハイライト定義
 -- ──────────────────────────────────────────────────────────────
 local function setup_hl()
   local h = vim.api.nvim_set_hl
-  h(0, "CargoCategoryTitle", { bold = true, link = "Label" })
-  h(0, "CargoSelected",      { bold = true, link = "PmenuSel" })
-  h(0, "CargoNormal",        { link = "Normal" })
-  h(0, "CargoSeparator",     { link = "Comment" })
-  h(0, "CargoMuted",         { link = "Comment" })
-  h(0, "CargoSuccess",       { fg = "#98c379", bold = true })
-  h(0, "CargoError",         { fg = "#e06c75", bold = true })
-  h(0, "CargoTabActive",     { bold = true, link = "TabLineSel" })
-  h(0, "CargoTabInactive",   { link = "TabLine" })
+  h(0, "CargoCategoryTitle", { bold = true,  link = "Label"      })
+  h(0, "CargoSelected",      { bold = true,  link = "PmenuSel"   })
+  h(0, "CargoNormal",        {               link = "Normal"      })
+  h(0, "CargoSeparator",     {               link = "Comment"     })
+  h(0, "CargoMuted",         {               link = "Comment"     })
+  h(0, "CargoSuccess",       { bold = true,  fg   = "#98c379"     })
+  h(0, "CargoError",         { bold = true,  fg   = "#e06c75"     })
+  h(0, "CargoTabActive",     { bold = true,  link = "TabLineSel"  })
+  h(0, "CargoTabInactive",   {               link = "TabLine"     })
+  h(0, "CargoTabKey",        {               link = "Comment"     })
 end
 
 -- ──────────────────────────────────────────────────────────────
--- タブ定義（3つ）
+-- タブ定義
 -- ──────────────────────────────────────────────────────────────
 local TABS = {
   { label = "Build / Run", key = "1" },
@@ -29,32 +30,61 @@ local TABS = {
 }
 
 -- ──────────────────────────────────────────────────────────────
--- ユーティリティ
+-- 文字列ユーティリティ
 -- ──────────────────────────────────────────────────────────────
-local function pad(s, w)
+-- 表示幅 w に右パディング（ASCII 前提、CJK は strdisplaywidth で対応）
+local function rpad(s, w)
   s = tostring(s or "")
-  local len = vim.fn.strdisplaywidth(s)
-  if len >= w then
-    -- 表示幅 w に切り詰め
-    local result = ""
-    local cur = 0
-    for _, cp in utf8.codes(s) do
-      local cw = vim.fn.strdisplaywidth(utf8.char(cp))
+  local dw = vim.fn.strdisplaywidth(s)
+  if dw >= w then
+    -- 表示幅で切り詰め（超過しないよう）
+    local result, cur = "", 0
+    for _, byte in utf8.codes(s) do
+      local ch  = utf8.char(byte)
+      local cw  = vim.fn.strdisplaywidth(ch)
       if cur + cw > w then break end
-      result = result .. utf8.char(cp)
-      cur = cur + cw
+      result, cur = result .. ch, cur + cw
     end
     return result .. string.rep(" ", w - cur)
   end
-  return s .. string.rep(" ", w - len)
+  return s .. string.rep(" ", w - dw)
 end
 
 local function hline(lw, rw)
   return string.rep("─", lw) .. "┼" .. string.rep("─", rw)
 end
 
-local function merge_row(ltext, rtext, lw)
-  return pad(ltext, lw) .. "│" .. (rtext or "")
+local function merged(ltext, rtext, lw)
+  return rpad(ltext, lw) .. "│" .. (rtext or "")
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- タブバー：テキストとハイライト位置を返す
+-- ──────────────────────────────────────────────────────────────
+local function tabbar(active)
+  -- "  Label [n]  │  Label [n]  │ ..."
+  -- ハイライト: ラベル部のみ TabActive/Inactive, [n] は CargoTabKey
+  local text  = ""
+  local hls   = {}   -- { col_s, col_e, group }
+
+  for i, t in ipairs(TABS) do
+    if i > 1 then
+      text = text .. "  │  "
+    else
+      text = text .. " "
+    end
+    local label_start = #text
+    text = text .. t.label
+    table.insert(hls, { label_start, #text, i == active and "CargoTabActive" or "CargoTabInactive" })
+
+    text = text .. " "
+    local key_start = #text
+    text = text .. "[" .. t.key .. "]"
+    table.insert(hls, { key_start, #text, "CargoTabKey" })
+    text = text .. " "
+  end
+
+  return text, hls
 end
 
 -- ──────────────────────────────────────────────────────────────
@@ -70,21 +100,22 @@ function State.new(root)
     pkg_name       = ws.get_package_name(root),
     -- タブ
     active_tab     = 1,
-    sel            = { 1, 1, 1 },   -- タブごとの選択行
+    sel            = { 1, 1, 1 },
     -- 出力
     output         = {},
     last_args      = nil,
     test_results   = {},
     -- Package タブ
-    pkg_section    = 1,             -- 1=installed, 2=search
+    pkg_section    = 1,          -- 1=installed, 2=search
     pkg_sel_inst   = 1,
     pkg_sel_search = 1,
     pkg_deps       = ws.get_dependencies(root),
     pkg_query      = "",
     pkg_results    = {},
     pkg_loading    = false,
-    pkg_detail_inst  = nil,         -- 選択中インストール済みの詳細
-    pkg_detail_srch  = nil,         -- 選択中検索結果の詳細
+    pkg_search_mode = false,     -- インライン検索入力中か
+    pkg_detail_inst = nil,
+    pkg_detail_srch = nil,
     -- UI
     buf            = nil,
     win            = nil,
@@ -94,6 +125,8 @@ function State.new(root)
     total_h        = 0,
     inst_h         = 0,
     srch_h         = 0,
+    -- ウィンドウ絶対位置（デバウンス検索用）
+    _debounce      = nil,
   }, State)
 end
 
@@ -106,63 +139,24 @@ local function buf_write(buf, lines, hls)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   vim.bo[buf].modifiable = false
   for _, h in ipairs(hls or {}) do
-    -- h = { lnum, col_s, col_e, group }
+    -- h = { lnum(0-based), col_s, col_e, group }
     pcall(vim.api.nvim_buf_add_highlight, buf, ns, h[4], h[1], h[2], h[3])
   end
 end
 
 -- ──────────────────────────────────────────────────────────────
--- タブバー行を生成
+-- 行リストを h 行に切り詰め / パディング
 -- ──────────────────────────────────────────────────────────────
-local function tabbar_line(active)
-  local parts = {}
-  for i, t in ipairs(TABS) do
-    local label = string.format(" %s [%s] ", t.label, t.key)
-    table.insert(parts, i == active and ("*" .. label .. "*") or label)
+local function clamp(rows, h)
+  local out = {}
+  for i = 1, h do
+    out[i] = rows[i] or { text = "", hl = "CargoNormal" }
   end
-  return table.concat(parts, "│")
-end
-
-local function tabbar_hls(line_str, active)
-  local hls = {}
-  local col = 0
-  for i, t in ipairs(TABS) do
-    local label = string.format(" %s [%s] ", t.label, t.key)
-    local w = #label
-    table.insert(hls, { 0, col, col + w, i == active and "CargoTabActive" or "CargoTabInactive" })
-    col = col + w + 1  -- +1 for │
-  end
-  return hls
+  return out
 end
 
 -- ──────────────────────────────────────────────────────────────
--- Package タブ詳細を非同期取得
--- ──────────────────────────────────────────────────────────────
-local function fetch_detail(state, item, is_search, redraw_fn)
-  if not item then return end
-  require("cargo.crates").get_detail(item.name, item.version, function(detail)
-    if is_search then
-      state.pkg_detail_srch = detail
-    else
-      state.pkg_detail_inst = detail
-    end
-    redraw_fn(state)
-  end)
-end
-
--- ──────────────────────────────────────────────────────────────
--- 各タブの左列行リスト
--- ──────────────────────────────────────────────────────────────
-local function build_run_left(state)
-  return require("cargo.ui.tabs.build_run").render_rows(state.sel[1])
-end
-
-local function test_left(state)
-  return require("cargo.ui.tabs.test").render_rows(state.sel[3], state.test_results)
-end
-
--- ──────────────────────────────────────────────────────────────
--- 右列: 出力パネル
+-- 出力パネル行リスト
 -- ──────────────────────────────────────────────────────────────
 local function output_rows(state)
   local rows = {}
@@ -173,9 +167,9 @@ local function output_rows(state)
   end
   for _, line in ipairs(state.output) do
     local hl = "CargoNormal"
-    if line:match("^error") then hl = "CargoError"
-    elseif line:match("^warning") then hl = "DiagnosticWarn"
-    elseif line:match("Finished") or line:match("✓") then hl = "CargoSuccess"
+    if     line:match("^error")    then hl = "CargoError"
+    elseif line:match("^warning")  then hl = "DiagnosticWarn"
+    elseif line:match("Finished")  then hl = "CargoSuccess"
     end
     table.insert(rows, { text = line, hl = hl })
   end
@@ -183,141 +177,111 @@ local function output_rows(state)
 end
 
 -- ──────────────────────────────────────────────────────────────
--- 行リストを total_h 行に切り詰め/パディング
+-- 左列行リスト（Build/Run, Test）
 -- ──────────────────────────────────────────────────────────────
-local function clamp_rows(rows, h)
-  local out = {}
-  for i = 1, h do
-    out[i] = rows[i] or { text = "", hl = "CargoNormal" }
+local function left_rows(state)
+  if state.active_tab == 1 then
+    return require("cargo.ui.tabs.build_run").render_rows(state.sel[1])
+  elseif state.active_tab == 3 then
+    return require("cargo.ui.tabs.test").render_rows(state.sel[3], state.test_results)
   end
-  return out
+  return {}
 end
 
 -- ──────────────────────────────────────────────────────────────
--- redraw
+-- ハイライト収集（左右列をマージした 1 行分）
+-- ──────────────────────────────────────────────────────────────
+local function collect_hl(lnum, lr, rr, lw)
+  local hls = {}
+  if lr and lr.hl and lr.hl ~= "CargoNormal" then
+    table.insert(hls, { lnum, 0, lw, lr.hl })
+  end
+  if rr and rr.hl and rr.hl ~= "CargoNormal" then
+    local rs = lw + 1
+    local re = rs + vim.fn.strdisplaywidth(rr.text or "")
+    table.insert(hls, { lnum, rs, re, rr.hl })
+  end
+  return hls
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- redraw（シングルバッファ全描画）
 -- ──────────────────────────────────────────────────────────────
 local function redraw(state)
   local buf = state.buf
-  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
 
-  local lw = state.lw
-  local rw = state.rw
-  local lines = {}
-  local hls   = {}
+  local lw     = state.lw
+  local rw     = state.rw
+  local lines  = {}
+  local hls    = {}
 
-  local function push(line, lnum_hl, col_s, col_e, hl_group)
+  local function push(line, row_hls)
     table.insert(lines, line)
-    if hl_group then
-      table.insert(hls, { #lines - 1, col_s or 0, col_e or -1, hl_group })
-    end
-    if lnum_hl then
-      for _, h in ipairs(lnum_hl) do
-        table.insert(hls, { #lines - 1, h[1], h[2], h[3] })
-      end
+    local lnum = #lines - 1  -- 0-indexed
+    for _, h in ipairs(row_hls or {}) do
+      table.insert(hls, { lnum, h[1], h[2], h[3] })
     end
   end
 
-  -- タブバー
-  local tb = tabbar_line(state.active_tab)
-  push(tb, tabbar_hls(tb, state.active_tab))
+  -- ─── タブバー ────────────────────────────────────────────
+  local tb_text, tb_hls = tabbar(state.active_tab)
+  push(tb_text, tb_hls)
   push(hline(lw, rw))
 
-  -- ── Package タブ ──────────────────────────────────────────
+  -- ─── Package タブ ────────────────────────────────────────
   if state.active_tab == 2 then
     local pkg = require("cargo.ui.tabs.packages")
 
-    -- 上段: インストール済み
-    local inst_rows = clamp_rows(
-      pkg.installed_rows(state.pkg_deps, state.pkg_sel_inst, ""),
-      state.inst_h)
-    local det_inst  = clamp_rows(
-      pkg.detail_rows(state.pkg_detail_inst),
-      state.inst_h)
-
+    -- 上段: インストール済み | 詳細
+    local inst = clamp(pkg.installed_rows(state.pkg_deps, state.pkg_sel_inst), state.inst_h)
+    local det1 = clamp(pkg.detail_rows(state.pkg_detail_inst, rw), state.inst_h)
     for i = 1, state.inst_h do
-      local lr = inst_rows[i]
-      local rr = det_inst[i]
-      local line = merge_row(lr.text, rr.text, lw)
-      local row_hls = {}
-      if lr.hl ~= "CargoNormal" then table.insert(row_hls, { 0, lw, lr.hl }) end
-      if rr.hl and rr.hl ~= "CargoNormal" then
-        table.insert(row_hls, { lw + 1, lw + 1 + #(rr.text or ""), rr.hl })
-      end
-      push(line, row_hls)
+      local lr, rr = inst[i], det1[i]
+      push(merged(lr.text, rr.text, lw), collect_hl(0, lr, rr, lw))
     end
 
     -- 中段セパレータ
     push(hline(lw, rw))
 
-    -- 下段: 検索
-    local srch_rows = clamp_rows(
-      pkg.search_rows(state),
+    -- 下段: 検索 | 詳細
+    local srch = clamp(
+      pkg.search_rows(state.pkg_query, state.pkg_results,
+                      state.pkg_loading, state.pkg_search_mode, lw),
       state.srch_h)
-    local det_srch  = clamp_rows(
-      pkg.detail_rows(state.pkg_detail_srch),
-      state.srch_h)
-
+    local det2 = clamp(pkg.detail_rows(state.pkg_detail_srch, rw), state.srch_h)
     for i = 1, state.srch_h do
-      local lr = srch_rows[i]
-      local rr = det_srch[i]
-      local line = merge_row(lr.text, rr.text, lw)
-      local row_hls = {}
-      -- 検索セクションにフォーカスがある行は左列を強調
-      if state.pkg_section == 2 and lr.hl ~= "CargoNormal" then
-        table.insert(row_hls, { 0, lw, lr.hl })
-      elseif state.pkg_section == 1 and lr.hl ~= "CargoNormal" then
-        table.insert(row_hls, { 0, lw, "CargoMuted" })
-      end
-      if rr.hl and rr.hl ~= "CargoNormal" then
-        table.insert(row_hls, { lw + 1, lw + 1 + #(rr.text or ""), rr.hl })
-      end
-      push(line, row_hls)
+      local lr, rr = srch[i], det2[i]
+      push(merged(lr.text, rr.text, lw), collect_hl(0, lr, rr, lw))
     end
 
-  -- ── Build/Run タブ ────────────────────────────────────────
-  elseif state.active_tab == 1 then
-    local lrows = clamp_rows(build_run_left(state), state.total_h)
-    local rrows = clamp_rows(output_rows(state),    state.total_h)
-    for i = 1, state.total_h do
-      local lr = lrows[i]
-      local rr = rrows[i]
-      local line = merge_row(lr.text, rr.text, lw)
-      local row_hls = {}
-      if lr.hl ~= "CargoNormal" then table.insert(row_hls, { 0, lw, lr.hl }) end
-      if rr.hl and rr.hl ~= "CargoNormal" then
-        table.insert(row_hls, { lw + 1, lw + 1 + #(rr.text or ""), rr.hl })
-      end
-      push(line, row_hls)
-    end
-
-  -- ── Test タブ ─────────────────────────────────────────────
+  -- ─── Build/Run・Test タブ ────────────────────────────────
   else
-    local lrows = clamp_rows(test_left(state),   state.total_h)
-    local rrows = clamp_rows(output_rows(state), state.total_h)
+    local lrows = clamp(left_rows(state),    state.total_h)
+    local rrows = clamp(output_rows(state),  state.total_h)
     for i = 1, state.total_h do
-      local lr = lrows[i]
-      local rr = rrows[i]
-      local line = merge_row(lr.text, rr.text, lw)
-      local row_hls = {}
-      if lr.hl ~= "CargoNormal" then table.insert(row_hls, { 0, lw, lr.hl }) end
-      if rr.hl and rr.hl ~= "CargoNormal" then
-        table.insert(row_hls, { lw + 1, lw + 1 + #(rr.text or ""), rr.hl })
-      end
-      push(line, row_hls)
+      local lr, rr = lrows[i], rrows[i]
+      push(merged(lr.text, rr.text, lw), collect_hl(0, lr, rr, lw))
     end
   end
 
-  -- ステータスバー
+  -- ─── ステータスバー ──────────────────────────────────────
   push(hline(lw, rw))
   local cfg = require("cargo.config").options
   local km  = cfg.keymaps
   local status
   if state.active_tab == 2 then
-    status = string.format("  Search [s]  Add [%s]  Remove [%s]  Nav [jk]  Tab [%s/%s]  Quit [%s]",
-      km.pkg_add, km.pkg_remove, km.tab_prev, km.tab_next, km.close)
+    if state.pkg_search_mode then
+      status = "  Search: 入力中  [Enter/Esc] 確定/キャンセル  [BS] 削除"
+    else
+      status = string.format(
+        "  [s] Search  [%s] Add  [%s] Remove  [jk] Nav  [Tab] Switch  [%s] Quit",
+        km.pkg_add, km.pkg_remove, km.close)
+    end
   else
-    status = string.format("  Run [%s]  Args [%s]  Re-run [%s]  Kill [%s]  Tab [%s/%s]  Quit [%s]",
-      km.run, km.args, km.rerun, km.kill, km.tab_prev, km.tab_next, km.close)
+    status = string.format(
+      "  [Enter] Run  [%s] Args  [%s] Re-run  [%s] Kill  []/[] Tab  [%s] Quit",
+      km.args, km.rerun, km.kill, km.close)
   end
   push(status)
 
@@ -333,7 +297,6 @@ local function run_cmd(state, args)
   if state.spinner then state.spinner:stop() end
   state.spinner = Spinner.new({ on_frame = function() redraw(state) end })
   state.spinner:start()
-
   runner.run({
     args    = args,
     cwd     = state.root,
@@ -342,25 +305,110 @@ local function run_cmd(state, args)
       if state.active_tab == 3 then
         local ok_n   = line:match("^test (.+) %.%.%. ok$")
         local fail_n = line:match("^test (.+) %.%.%. FAILED$")
-        if ok_n   then table.insert(state.test_results, { name = ok_n,   ok = true })  end
+        if ok_n   then table.insert(state.test_results, { name = ok_n,   ok = true  }) end
         if fail_n then table.insert(state.test_results, { name = fail_n, ok = false }) end
       end
       redraw(state)
     end,
     on_exit = function(code)
       if state.spinner then state.spinner:stop() end
-      local cfg = require("cargo.config").options
+      local icon = code == 0 and require("cargo.config").options.icons.success
+                              or require("cargo.config").options.icons.error
       table.insert(state.output, "")
-      table.insert(state.output,
-        string.format("  %s 終了コード: %d",
-          code == 0 and cfg.icons.success or cfg.icons.error, code))
+      table.insert(state.output, string.format("  %s 終了コード: %d", icon, code))
       redraw(state)
     end,
   })
 end
 
 -- ──────────────────────────────────────────────────────────────
--- キーマップ
+-- crates.io 詳細を非同期取得
+-- ──────────────────────────────────────────────────────────────
+local function fetch_detail(state, item, is_search)
+  if not item then return end
+  require("cargo.crates").get_detail(item.name, item.version, function(detail)
+    if is_search then
+      state.pkg_detail_srch = detail
+    else
+      state.pkg_detail_inst = detail
+    end
+    redraw(state)
+  end)
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- インライン検索モード
+-- ──────────────────────────────────────────────────────────────
+local function trigger_search(state)
+  if state._debounce then
+    state._debounce:stop()
+    state._debounce:close()
+    state._debounce = nil
+  end
+  if state.pkg_query == "" then
+    state.pkg_results   = {}
+    state.pkg_loading   = false
+    state.pkg_detail_srch = nil
+    redraw(state)
+    return
+  end
+  state.pkg_loading = true
+  redraw(state)
+  local cfg = require("cargo.config").options
+  state._debounce = vim.uv.new_timer()
+  state._debounce:start(cfg.search.debounce_ms, 0, vim.schedule_wrap(function()
+    state._debounce = nil
+    require("cargo.crates").search(state.pkg_query, function(results)
+      state.pkg_results   = results
+      state.pkg_loading   = false
+      state.pkg_sel_search = 1
+      state.pkg_detail_srch = nil
+      redraw(state)
+      if results[1] then fetch_detail(state, results[1], true) end
+    end)
+  end))
+end
+
+local function enter_search_mode(state, setup_keys_fn)
+  state.pkg_search_mode = true
+  state.pkg_section     = 2
+  redraw(state)
+
+  local buf = state.buf
+
+  -- 既存のキーマップを一時的に上書き
+  local function char_map(ch)
+    vim.keymap.set("n", ch, function()
+      state.pkg_query = state.pkg_query .. ch
+      trigger_search(state)
+      redraw(state)
+    end, { buffer = buf, noremap = true, silent = true })
+  end
+
+  -- 印字可能 ASCII（スペース〜チルダ）
+  for c = 32, 126 do
+    char_map(string.char(c))
+  end
+
+  vim.keymap.set("n", "<BS>", function()
+    if #state.pkg_query > 0 then
+      state.pkg_query = state.pkg_query:sub(1, -2)
+      trigger_search(state)
+      redraw(state)
+    end
+  end, { buffer = buf, noremap = true, silent = true })
+
+  local function exit_search()
+    state.pkg_search_mode = false
+    setup_keys_fn()   -- 通常キーマップに戻す
+    redraw(state)
+  end
+  vim.keymap.set("n", "<CR>",  exit_search, { buffer = buf, noremap = true, silent = true })
+  vim.keymap.set("n", "<Esc>", exit_search, { buffer = buf, noremap = true, silent = true })
+end
+
+-- ──────────────────────────────────────────────────────────────
+-- 通常キーマップ設定
 -- ──────────────────────────────────────────────────────────────
 local function setup_keys(state)
   local cfg = require("cargo.config").options
@@ -369,9 +417,20 @@ local function setup_keys(state)
   local o   = { noremap = true, silent = true, buffer = buf }
   local function map(key, fn) vim.keymap.set("n", key, fn, o) end
 
+  -- 印字可能文字を全クリア（検索モード後の復元）
+  for c = 32, 126 do
+    pcall(vim.keymap.del, "n", string.char(c), { buffer = buf })
+  end
+  pcall(vim.keymap.del, "n", "<BS>",  { buffer = buf })
+  pcall(vim.keymap.del, "n", "<CR>",  { buffer = buf })
+  pcall(vim.keymap.del, "n", "<Esc>", { buffer = buf })
+
   local function close()
     if state.spinner then state.spinner:stop() end
     runner.kill()
+    if state._debounce then
+      state._debounce:stop(); state._debounce:close(); state._debounce = nil
+    end
     if state.win and vim.api.nvim_win_is_valid(state.win) then
       vim.api.nvim_win_close(state.win, true)
     end
@@ -381,13 +440,13 @@ local function setup_keys(state)
     state.active_tab   = n
     state.output       = {}
     state.test_results = {}
+    setup_keys(state)
     redraw(state)
   end
 
-  -- 現在のタブ・セクションのコマンドを実行
   local function do_run()
     if state.active_tab == 2 then
-      -- Package タブ: 検索セクションで Enter = add
+      -- Package: 検索セクションで Enter = add
       if state.pkg_section == 2 then
         local r = state.pkg_results[state.pkg_sel_search]
         if r then
@@ -395,7 +454,7 @@ local function setup_keys(state)
           vim.defer_fn(function()
             state.pkg_deps = require("cargo.workspace").get_dependencies(state.root)
             redraw(state)
-          end, 800)
+          end, 900)
         end
       end
       return
@@ -420,28 +479,25 @@ local function setup_keys(state)
     end
   end
 
-  -- j/k 移動
   local function move(d)
     if state.active_tab == 2 then
       if state.pkg_section == 1 then
-        local n = math.max(1, #state.pkg_deps)
+        local n    = math.max(1, #state.pkg_deps)
         local prev = state.pkg_sel_inst
         state.pkg_sel_inst = math.max(1, math.min(n, state.pkg_sel_inst + d))
         if state.pkg_sel_inst ~= prev then
           state.pkg_detail_inst = nil
           redraw(state)
-          local dep = state.pkg_deps[state.pkg_sel_inst]
-          if dep then fetch_detail(state, dep, false, redraw) end
+          fetch_detail(state, state.pkg_deps[state.pkg_sel_inst], false)
         end
       else
-        local n = math.max(1, #state.pkg_results)
+        local n    = math.max(1, #state.pkg_results)
         local prev = state.pkg_sel_search
         state.pkg_sel_search = math.max(1, math.min(n, state.pkg_sel_search + d))
         if state.pkg_sel_search ~= prev then
           state.pkg_detail_srch = nil
           redraw(state)
-          local r = state.pkg_results[state.pkg_sel_search]
-          if r then fetch_detail(state, r, true, redraw) end
+          fetch_detail(state, state.pkg_results[state.pkg_sel_search], true)
         end
       end
       return
@@ -458,22 +514,21 @@ local function setup_keys(state)
     redraw(state)
   end
 
-  map(km.close,      close)
-  map("<Esc>",       close)
-  map("j",           function() move(1) end)
-  map("k",           function() move(-1) end)
-  map(km.run,        do_run)
-  map(km.pkg_add,    do_run)
-  map(km.rerun,      function()
+  map(km.close,  close)
+  map("<Esc>",   close)
+  map("j",       function() move(1)  end)
+  map("k",       function() move(-1) end)
+  map("<CR>",    do_run)
+  map(km.rerun,  function()
     if state.last_args then run_cmd(state, state.last_args) end
   end)
-  map(km.kill,       function()
+  map(km.kill,   function()
     runner.kill()
     if state.spinner then state.spinner:stop() end
     table.insert(state.output, "  [中断]")
     redraw(state)
   end)
-  map(km.args,       function()
+  map(km.args,   function()
     if state.active_tab == 2 then return end
     vim.ui.input({ prompt = "追加引数: " }, function(input)
       if input and input ~= "" and state.last_args then
@@ -481,58 +536,40 @@ local function setup_keys(state)
       end
     end)
   end)
-  map(km.tab_next,   function() switch_tab(math.min(#TABS, state.active_tab + 1)) end)
-  map(km.tab_prev,   function() switch_tab(math.max(1,     state.active_tab - 1)) end)
-  map(km.tab_build,  function() switch_tab(1) end)
-  map(km.tab_pkgs,   function() switch_tab(2) end)
-  map(km.tab_test,   function() switch_tab(3) end)
 
-  -- Package: Tab でセクション切り替え
-  map(km.panel_next, function()
-    if state.active_tab ~= 2 then return end
-    state.pkg_section = state.pkg_section == 1 and 2 or 1
-    redraw(state)
-  end)
-  map(km.panel_prev, function()
+  -- タブ切り替え
+  map(km.tab_next,  function() switch_tab(math.min(#TABS, state.active_tab + 1)) end)
+  map(km.tab_prev,  function() switch_tab(math.max(1,     state.active_tab - 1)) end)
+  map(km.tab_build, function() switch_tab(1) end)
+  map(km.tab_pkgs,  function() switch_tab(2) end)
+  map(km.tab_test,  function() switch_tab(3) end)
+
+  -- Package タブ専用
+  map("<Tab>", function()
     if state.active_tab ~= 2 then return end
     state.pkg_section = state.pkg_section == 1 and 2 or 1
     redraw(state)
   end)
 
-  -- Package: s = 検索
+  -- s = インライン検索モード開始
   map("s", function()
     if state.active_tab ~= 2 then return end
-    vim.ui.input({ prompt = "crates.io: ", default = state.pkg_query }, function(input)
-      if input == nil then return end
-      state.pkg_query      = input
-      state.pkg_loading    = true
-      state.pkg_section    = 2
-      state.pkg_sel_search = 1
-      state.pkg_detail_srch = nil
-      redraw(state)
-      require("cargo.crates").search(input, function(results)
-        state.pkg_results = results
-        state.pkg_loading = false
-        redraw(state)
-        if results[1] then fetch_detail(state, results[1], true, redraw) end
-      end)
-    end)
+    enter_search_mode(state, function() setup_keys(state) end)
   end)
 
-  -- Package: d = remove
+  -- d = remove（インストール済みセクション）
   map(km.pkg_remove, function()
     if state.active_tab ~= 2 or state.pkg_section ~= 1 then return end
     local dep = state.pkg_deps[state.pkg_sel_inst]
     if not dep then return end
     vim.ui.select({ "はい", "いいえ" }, { prompt = dep.name .. " を削除？" }, function(choice)
-      if choice == "はい" then
-        run_cmd(state, { "remove", dep.name })
-        vim.defer_fn(function()
-          state.pkg_deps    = require("cargo.workspace").get_dependencies(state.root)
-          state.pkg_sel_inst = math.max(1, math.min(#state.pkg_deps, state.pkg_sel_inst))
-          redraw(state)
-        end, 800)
-      end
+      if choice ~= "はい" then return end
+      run_cmd(state, { "remove", dep.name })
+      vim.defer_fn(function()
+        state.pkg_deps     = require("cargo.workspace").get_dependencies(state.root)
+        state.pkg_sel_inst = math.max(1, math.min(#state.pkg_deps, state.pkg_sel_inst))
+        redraw(state)
+      end, 900)
     end)
   end)
 end
@@ -550,17 +587,15 @@ function M.open(root)
   local vh = vim.o.lines
   local W  = math.floor(vw * cfg.window.width)
   local H  = math.floor(vh * cfg.window.height)
+  local iw = W - 2  -- border 除く内側幅
+  local ih = H - 2  -- border 除く内側高さ
 
-  -- 内側サイズ (border 除く)
-  local iw = W - 2
-  local ih = H - 2
-
-  state.lw      = math.floor(iw * 0.40)
-  state.rw      = iw - state.lw - 1
-  -- total_h: タブバー(1) + sep(1) + content + sep(1) + status(1) = 4 fixed
+  state.lw      = math.floor(iw * 0.42)
+  state.rw      = iw - state.lw - 1   -- "│" 分
+  -- ih - tabbar(1) - sep(1) - bottom_sep(1) - status(1) = コンテンツ行数
   state.total_h = ih - 4
-  -- Package タブ: content を上段 40% + mid_sep(1) + 下段 に分割
-  state.inst_h  = math.floor((state.total_h - 1) * 0.40)
+  -- Package タブ: 上段 38% / 中段セパレータ / 下段
+  state.inst_h  = math.floor((state.total_h - 1) * 0.38)
   state.srch_h  = state.total_h - state.inst_h - 1
 
   local buf = vim.api.nvim_create_buf(false, true)
@@ -589,16 +624,20 @@ function M.open(root)
   setup_keys(state)
 
   vim.api.nvim_create_autocmd("WinClosed", {
-    pattern = tostring(win), once = true,
+    pattern  = tostring(win),
+    once     = true,
     callback = function()
       if state.spinner then state.spinner:stop() end
+      if state._debounce then
+        state._debounce:stop(); state._debounce:close()
+      end
       runner.kill()
     end,
   })
 
-  -- 初期詳細を取得（インストール済み先頭）
+  -- 初期詳細ロード
   if state.pkg_deps[1] then
-    fetch_detail(state, state.pkg_deps[1], false, redraw)
+    fetch_detail(state, state.pkg_deps[1], false)
   end
 
   redraw(state)
