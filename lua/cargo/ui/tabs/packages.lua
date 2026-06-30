@@ -40,13 +40,11 @@ end
 -- 検索セクション行（検索バー + 結果一覧）
 function M.search_rows(query, results, loading, search_mode, lw)
   local rows = {}
-  -- 検索バー: "  Search: [query]▌____"
-  local q         = query or ""
-  local cursor    = search_mode and "▌" or ""
-  local fill_max  = lw - 12  -- "  Search: " = 10, indent = 2
-  local fill      = string.rep("_", math.max(0, fill_max - #q - #cursor))
+  -- 検索バー: "  Search: [query]▌"
+  local q      = query or ""
+  local cursor = search_mode and "▌" or ""
   table.insert(rows, {
-    text = "  Search: " .. q .. cursor .. fill,
+    text = "  Search: " .. q .. cursor,
     hl   = search_mode and "CargoSelected" or "CargoNormal",
     is_search_bar = true,
   })

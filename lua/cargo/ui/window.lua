@@ -621,6 +621,20 @@ function M.open(root)
   vim.wo[win].number     = false
   vim.wo[win].cursorline = false
 
+  -- カーソルを非表示にする（Cursor hl を透明化、ウィンドウ閉時に復元）
+  local saved_cursor_hl = vim.api.nvim_get_hl(0, { name = "Cursor" })
+  vim.api.nvim_set_hl(0, "Cursor", { blend = 100, fg = "bg", bg = "bg" })
+
+  -- カーソル位置を常に左上に固定
+  vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+    buffer   = buf,
+    callback = function()
+      if vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+      end
+    end,
+  })
+
   setup_keys(state)
 
   vim.api.nvim_create_autocmd("WinClosed", {
@@ -632,6 +646,8 @@ function M.open(root)
         state._debounce:stop(); state._debounce:close()
       end
       runner.kill()
+      -- カーソルハイライトを復元
+      vim.api.nvim_set_hl(0, "Cursor", saved_cursor_hl)
     end,
   })
 
