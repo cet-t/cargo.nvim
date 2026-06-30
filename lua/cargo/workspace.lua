@@ -1,33 +1,28 @@
 local M = {}
 
--- カレントバッファから上方向に Cargo.toml を探す
-function M.find_root()
-  local path = vim.fn.expand("%:p:h")
-  if path == "" then
-    path = vim.fn.getcwd()
-  end
-
-  local prev = nil
-  while path ~= prev do
+-- 指定ディレクトリから上方向に Cargo.toml を探す
+local function search_up(start)
+  -- パスを正規化してトレイリングスラッシュを除去
+  local path = vim.fn.fnamemodify(start, ":p"):gsub("[/\\]+$", "")
+  for _ = 1, 30 do
     if vim.fn.filereadable(path .. "/Cargo.toml") == 1 then
       return path
     end
-    prev = path
-    path = vim.fn.fnamemodify(path, ":h")
+    local parent = vim.fn.fnamemodify(path, ":h")
+    if parent == path then break end  -- ルートに到達
+    path = parent
   end
-
-  -- バッファで見つからなければ cwd から探す
-  path = vim.fn.getcwd()
-  prev = nil
-  while path ~= prev do
-    if vim.fn.filereadable(path .. "/Cargo.toml") == 1 then
-      return path
-    end
-    prev = path
-    path = vim.fn.fnamemodify(path, ":h")
-  end
-
   return nil
+end
+
+-- カレントバッファ → cwd の順で Cargo.toml を探す
+function M.find_root()
+  local buf_dir = vim.fn.expand("%:p:h")
+  if buf_dir ~= "" and buf_dir ~= "." then
+    local found = search_up(buf_dir)
+    if found then return found end
+  end
+  return search_up(vim.fn.getcwd())
 end
 
 -- Cargo.toml から package 名を取得
